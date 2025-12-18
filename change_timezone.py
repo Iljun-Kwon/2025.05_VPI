@@ -17,62 +17,81 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 KST = timezone(timedelta(hours=9))
-three_weeks_ago_utc = (datetime.utcnow() - timedelta(weeks=3)).isoformat()
+_MICRO_RE = re.compile(r"(\.\d{1,6})(\d*)")
 
 # 페이징 처리 설정
 BATCH_SIZE = 1000
-offset = 0
-updated_count = 0
-total_batches = 0
 
-while True:
-    response = supabase.table("video_snapshots")\
-        .select("id, collected_at")\
-        .gte("collected_at", three_weeks_ago_utc)\
-        .range(offset, offset + BATCH_SIZE - 1)\
-        .execute()
+def _normalize_iso_fraction(s: str) -> str:
+    if "." not in s:
+        return s
+    # Keep first 1~6 digits; ignore extra
+    return _MICRO_RE.sub(lambda m: m.group(1)[:7], s)
 
-    rows = response.data
+def _parse_iso_to_utc(dt_str: str) -> Optional[datetime]:
+    if not dt_str:
+        return None
 
-    if not rows:
-        break  # 더 이상 데이터 없음
+    dt_str = dt_str.strip().replace("Z", "+00:00")
+    dt_str = _normalize_iso_fraction(dt_str)
 
-    print(f"\n🔄 Batch {total_batches + 1} - 처리 중 (총 {len(rows)}개 항목)")
+    try:
+        dt = datetime.fromisoformat(dt_str)
+    except ValueError:
+        return None
 
-    # ✅ tqdm으로 현재 배치 진행률 표시
-    for row in tqdm(rows, desc=f"🧪 Batch {total_batches + 1}", unit="row"):
-        snapshot_id = row["id"]
-        collected_at_str = row["collected_at"]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
 
-        try:
-            # 마이크로초 보정
-            if "." in collected_at_str:
-                collected_at_str = re.sub(
-                    r'(\.\d{1,6})(\d*)',
-                    lambda m: m.group(1).ljust(7, "0"),
-                    collected_at_str
-                )
+    return dt.astimezone(timezone.utc)
 
-            # 문자열 → datetime
-            utc_time = datetime.fromisoformat(collected_at_str)
+def backfill_collected_at_kst():
+    updated_total = 0
+    offset = 0
+    batch_num = 0
 
-            if utc_time.tzinfo is None:
-                utc_time = utc_time.replace(tzinfo=timezone.utc)
+    while True:
+        # Pull a page
+        resp = (
+            supabase.table("video_snapshots")
+            .select("id,collected_at")
+            .range(offset, offset + BATCH_SIZE - 1)
+            .execute()
+        )
 
-            kst_time = utc_time.astimezone(KST).isoformat()
+        rows: List[Dict] = resp.data or []
+        if not rows:
+            break
 
-            # Supabase 업데이트
-            supabase.table("video_snapshots")\
-                .update({"collected_at_kst": kst_time})\
-                .eq("id", snapshot_id)\
-                .execute()
+        batch_num += 1
+        updates: List[Dict] = []
 
-            updated_count += 1
+        for row in tqdm(rows, desc=f"Batch {batch_num}", unit="row"):
+            snapshot_id = row.get("id")
+            collected_at_str = row.get("collected_at")
 
-        except Exception as e:
-            print(f"[❌] ID {snapshot_id} 변환 실패: {e}")
+            if not snapshot_id or not collected_at_str:
+                continue
 
-    offset += BATCH_SIZE
-    total_batches += 1
+            utc_dt = _parse_iso_to_utc(collected_at_str)
+            if utc_dt is None:
+                continue
 
-print(f"\n✅ 전체 완료: {updated_count}개의 행이 collected_at_kst 컬럼으로 업데이트되었습니다.")
+            kst_dt = utc_dt.astimezone(KST).isoformat()
+
+            updates.append({
+                "id": snapshot_id,
+                "collected_at_kst": kst_dt
+            })
+
+        # ✅ ONE request per batch
+        if updates:
+            supabase.table("video_snapshots").upsert(updates, on_conflict=["id"]).execute()
+            updated_total += len(updates)
+
+        offset += BATCH_SIZE
+
+    print(f"[✅] Backfill done. Updated rows: {updated_total}")
+
+if __name__ == "__main__":
+    backfill_collected_at_kst()

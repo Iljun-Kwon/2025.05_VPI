@@ -2,7 +2,6 @@
 
 import os
 from typing import List
-from datetime import datetime
 from youtube.api_key import build_youtube_with_fallback
 
 from supabase import create_client, Client
@@ -17,7 +16,7 @@ def get_channel_ids_from_supabase() -> List[str]:
     response = supabase.table("channels").select("id").execute()
     return [item['id'] for item in response.data]
 
-def fetch_and_store_channel_data(channel_ids: List[str]):
+def fetch_and_store_channel_data(channel_ids: List[str], collected_at_utc: str):
     """YouTube API로 채널 정보를 수집하고, Supabase에 트랜잭션으로 저장"""
     # 인증 및 클라이언트 생성
     youtube = build_youtube_with_fallback()
@@ -25,7 +24,6 @@ def fetch_and_store_channel_data(channel_ids: List[str]):
     # 트랜잭션 시작 (로컬 캐싱)
     updates_channels = []
     inserts_snapshots = []
-    collected_at = datetime.now().isoformat()
 
     # 배치로 50개씩 API 호출
     for i in range(0, len(channel_ids), 50):
@@ -44,7 +42,7 @@ def fetch_and_store_channel_data(channel_ids: List[str]):
             # snapshot 저장용
             inserts_snapshots.append({
                 "channel_id": channel_id,
-                "collected_at": collected_at,
+                "collected_at": collected_at_utc,
                 "subscriber_count": int(stats.get("subscriberCount", 0)) if not stats.get("hiddenSubscriberCount") else None,
                 "video_count": int(stats.get("videoCount", 0)),
                 "total_view_count": int(stats.get("viewCount", 0)),

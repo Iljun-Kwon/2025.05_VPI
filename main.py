@@ -5,6 +5,7 @@ from youtube.youtube_channel_collector import get_channel_ids_from_supabase, fet
 from youtube.youtube_video_collector import fetch_videos_from_channel, store_videos_and_snapshots
 from supabase import create_client, Client
 import os
+from datetime import datetime, timezone
 
 # Supabase 설정
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -12,6 +13,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 if __name__ == "__main__":
+    RUN_COLLECTED_AT = datetime.now(timezone.utc).isoformat()
+
     admins = fetch_channel_admin_list()
     initialize_channels_from_admins(admins)
     
@@ -19,12 +22,15 @@ if __name__ == "__main__":
     test_channel_ids = get_channel_ids_from_supabase()
 
     # 각 채널 ID에 대해 채널 정보를 수집하고 Supabase에 저장합니다.
-    fetch_and_store_channel_data(test_channel_ids)
+    fetch_and_store_channel_data(test_channel_ids, RUN_COLLECTED_AT)
     
     # 각 채널 ID에 대해 영상을 수집하고 Supabase에 저장합니다.
     for channel_id in test_channel_ids:
         videos = fetch_videos_from_channel(channel_id)
-        video_records, snapshot_records = store_videos_and_snapshots(channel_id, videos)
+        video_records, snapshot_records = store_videos_and_snapshots(channel_id, videos, RUN_COLLECTED_AT)
+
+        if not video_records:
+            continue
 
         try:
             # 영상 업서트

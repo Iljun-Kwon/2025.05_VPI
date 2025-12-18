@@ -18,7 +18,7 @@ from googleapiclient.errors import HttpError
 load_dotenv()
 
 # 여러 키 불러오기
-API_KEYS = [v for k, v in os.environ.items() if k.startswith('API_KEY_')]
+API_KEYS = [os.environ[k] for k in sorted(os.environ) if k.startswith('API_KEY_')]
 
 def build_youtube_with_fallback(api_keys=API_KEYS):
     """

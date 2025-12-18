@@ -2,7 +2,7 @@
 
 import os
 import isodate
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import List, Dict
 from youtube.api_key import build_youtube_with_fallback
 
@@ -13,6 +13,10 @@ from supabase import create_client, Client
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+VIDEO_CUTOFF_UTC = datetime(2025, 12, 16, 15, 0, tzinfo=timezone.utc)
+
+def _parse_yt_published_at_utc(published_at: str) -> datetime:
+    return datetime.fromisoformat(published_at.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 def fetch_videos_from_channel(channel_id: str) -> List[Dict]:
     youtube = build_youtube_with_fallback()
@@ -36,15 +40,36 @@ def fetch_videos_from_channel(channel_id: str) -> List[Dict]:
         maxResults=50
     ).execute()
 
-    video_ids = [item["contentDetails"]["videoId"] for item in playlist_response["items"]]
+    items = playlist_response.get("items", [])
+    if not items:
+        return []
+
+    # ✅ Filter by publishedAt using UTC cutoff
+    # Uploads playlist is newest -> oldest, so we can "break" once older than cutoff.
+    filtered_video_ids: List[str] = []
+    for item in items:
+        published_at = item.get("snippet", {}).get("publishedAt")
+        if not published_at:
+            continue
+
+        published_dt_utc = _parse_yt_published_at_utc(published_at)
+        if published_dt_utc < VIDEO_CUTOFF_UTC:
+            break  # stop early (older videos beyond this are also older)
+
+        vid = item.get("contentDetails", {}).get("videoId")
+        if vid:
+            filtered_video_ids.append(vid)
+
+    if not filtered_video_ids:
+        return []
 
     # Step 3: video statistics 포함된 video 상세 정보 얻기
     videos_response = youtube.videos().list(
         part="snippet,statistics,contentDetails",
-        id=",".join(video_ids)
+        id=",".join(filtered_video_ids)
     ).execute()
 
-    return videos_response["items"]
+    return videos_response.get("items", [])
 
 def parse_duration_to_seconds(duration_str: str) -> int:
     """ISO 8601 duration → 초 단위 정수 변환"""
@@ -54,10 +79,7 @@ def parse_duration_to_seconds(duration_str: str) -> int:
     except Exception:
         return 0
 
-def store_videos_and_snapshots(channel_id: str, videos: List[Dict]):
-    KST = timezone(timedelta(hours=9))
-    collected_at = datetime.now(KST).isoformat()
-    
+def store_videos_and_snapshots(channel_id: str, videos: List[Dict], collected_at_utc: str):
     video_records = []
     snapshot_records = []
 
@@ -88,7 +110,7 @@ def store_videos_and_snapshots(channel_id: str, videos: List[Dict]):
 
         snapshot_records.append({
             "video_id": vid,
-            "collected_at": collected_at,
+            "collected_at": collected_at_utc,
             "view_count": int(stats.get("viewCount", 0)),
             "like_count": int(stats.get("likeCount", 0)),
             "comment_count": int(stats.get("commentCount", 0))
